@@ -32,10 +32,12 @@ interface State {
   videoUrl: string;
   translatedAudioUrl: string;
   emailAddress: string;
+  isEmailSubmitted: boolean;
   isLanguageSelectorOpen: { source: boolean; target: boolean };
   jobId: string | null;
   isTranslatedPlaying: boolean;
   notification: { message: string; type: 'error' | 'success' } | null;
+  isCancelled: boolean;
 }
 interface Refs {
   fileInputRef: HTMLInputElement | null;
@@ -100,7 +102,7 @@ const targetLanguages: Language[] = [
   { locale: 'nb_NO', language: 'Norwegian', flag: 'https://murf.ai/public-assets/Flags/Country%3DNorway.svg' },
   { locale: 'hr_HR', language: 'Croatian', flag: 'https://murf.ai/public-assets/Flags/Country%3DCroatia.svg' },
   { locale: 'el_GR', language: 'Greek', flag: 'https://murf.ai/public-assets/Flags/Country%3DGreece.svg' },
-  { locale: 'sk_SK', language: 'Slovak', flag: 'https://murf.ai/public-assets/Flags/Country%3DSlovakia.svg' },
+  { locale: 'sk_SK', language: 'Slovak', flag: 'https://murf.ai/public-assets/ as/Country%3DSlovakia.svg' },
 ];
 
 const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
@@ -125,10 +127,12 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
     videoUrl: '',
     translatedAudioUrl: '',
     emailAddress: '',
+    isEmailSubmitted: false,
     isLanguageSelectorOpen: { source: false, target: false },
     jobId: null,
     isTranslatedPlaying: false,
     notification: null,
+    isCancelled: false,
   });
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -141,6 +145,28 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
   const showNotification = useCallback((message: string, type: 'error' | 'success') => {
     setState(s => ({ ...s, notification: { message, type } }));
   }, []);
+
+  const updateEmail = useCallback(async (jobId: string, email: string) => {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showNotification('Please enter a valid email address', 'error');
+      return;
+    }
+    try {
+      const response = await fetch(`https://api.dev.murf.ai/murfdub/anonymous/jobs/${jobId}/update-email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: email,
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to update email: ${errorText}`);
+      }
+      setState(s => ({ ...s, isEmailSubmitted: true }));
+      showNotification(`Email updated to ${email}`, 'success');
+    } catch (error) {
+      showNotification(error instanceof Error ? error.message : 'Error updating email', 'error');
+    }
+  }, [showNotification]);
 
   const submitFileToDub = useCallback(async (file: File) => {
     const sourceLocale = sourceLanguages.find(l => l.language === state.sourceLanguage)?.locale || '';
@@ -159,7 +185,7 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
       if (!response.ok) {
         const errorText = await response.text();
         if (errorText.includes('submitted max free dubs')) {
-          showNotification('Free translation limit reached. Please try again later.', 'error');
+          showNotification('Free translation limit reached. Sign Up for Free to Murf Studio.', 'error');
           setState(s => ({ ...s, uploadState: null, uploadedFile: null, videoUrl: '', jobId: null }));
           return;
         }
@@ -167,10 +193,10 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
       }
       const data = await response.json();
       if (!data.job_id) throw new Error('No job ID received');
-      setState(s => ({ ...s, jobId: data.job_id, uploadState: 'processing', progress: 30 }));
+      setState(s => (s.isCancelled ? s : { ...s, jobId: data.job_id, uploadState: 'processing', progress: 30 }));
     } catch (error) {
+      setState(s => (s.isCancelled ? s : { ...s, uploadState: null, uploadedFile: null, videoUrl: '', jobId: null }));
       showNotification(error instanceof Error ? error.message : 'Error submitting file', 'error');
-      setState(s => ({ ...s, uploadState: null, uploadedFile: null, videoUrl: '', jobId: null }));
     }
   }, [state.sourceLanguage, state.targetLanguage, state.emailAddress, showNotification]);
 
@@ -223,12 +249,13 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
     if (videoRef.current) setState(s => ({ ...s, duration: videoRef.current!.duration }));
   }, []);
 
-  const handleProgressBarClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+  const handleProgressBarClick = useCallback((e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>) => {
     const { current: video } = videoRef;
     const { current: progressBar } = progressBarRef;
     if (video && progressBar) {
       const rect = progressBar.getBoundingClientRect();
-      video.currentTime = ((e.clientX - rect.left) / rect.width) * video.duration || 0;
+      const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+      video.currentTime = ((clientX - rect.left) / rect.width) * video.duration || 0;
     }
   }, []);
 
@@ -239,11 +266,12 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
     if (videoRef.current) videoRef.current.playbackRate = nextSpeed;
   }, [state.playbackSpeed]);
 
-  const handleWaveClick = useCallback((e: React.MouseEvent<HTMLDivElement>, type: MediaType) => {
+  const handleWaveClick = useCallback((e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>, type: MediaType) => {
     const audioRef = type === 'source' ? sourceAudioRef : targetAudioRef;
     if (!audioRef.current) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const clickPosition = (e.clientX - rect.left) / rect.width;
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clickPosition = (clientX - rect.left) / rect.width;
     audioRef.current.currentTime = clickPosition * (type === 'source' ? state.sourceDuration : state.targetDuration) || 0;
   }, [state.sourceDuration, state.targetDuration]);
 
@@ -269,13 +297,45 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
   const handleLanguageToggle = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const isSource = (e.clientX - rect.left) < rect.width / 2;
+    const currentTime = videoRef.current?.currentTime || 0;
+    const wasPlaying = state.isPlaying === 'video';
+    
     if (videoRef.current) {
       videoRef.current.src = isSource ? state.videoUrl : state.translatedAudioUrl;
       videoRef.current.load();
-      videoRef.current.pause();
-      setState(s => ({ ...s, isPlaying: false, isTranslatedPlaying: !isSource }));
+      
+      const onLoadedMetadata = () => {
+        videoRef.current!.currentTime = currentTime;
+        if (wasPlaying) {
+          videoRef.current!.play().catch(console.error);
+        }
+        videoRef.current!.removeEventListener('loadedmetadata', onLoadedMetadata);
+      };
+      
+      videoRef.current.addEventListener('loadedmetadata', onLoadedMetadata);
+      
+      setState(s => ({ 
+        ...s, 
+        isPlaying: wasPlaying ? 'video' : false, 
+        isTranslatedPlaying: !isSource 
+      }));
     }
-  }, [state.videoUrl, state.translatedAudioUrl]);
+  }, [state.videoUrl, state.translatedAudioUrl, state.isPlaying]);
+
+  const checkFileDuration = useCallback((file: File): Promise<number> => {
+    return new Promise((resolve) => {
+      const media = file.type.startsWith('video/') ? document.createElement('video') : document.createElement('audio');
+      media.src = URL.createObjectURL(file);
+      media.onloadedmetadata = () => {
+        URL.revokeObjectURL(media.src);
+        resolve(media.duration);
+      };
+      media.onerror = () => {
+        URL.revokeObjectURL(media.src);
+        resolve(0);
+      };
+    });
+  }, []);
 
   const handleFile = useCallback(async (file: File) => {
     if (!['video/mp4', 'video/avi', 'video/mov', 'video/wmv', 'audio/mp3', 'audio/wav', 'audio/m4a'].includes(file.type) &&
@@ -283,12 +343,19 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
       showNotification('Please upload a valid video or audio file', 'error');
       return;
     }
-    setState(s => ({ ...s, uploadedFile: file, uploadState: 'uploading', progress: 0 }));
+
+    const duration = await checkFileDuration(file);
+    if (duration > 120) {
+      showNotification('Error: The uploaded file exceeds the maximum duration of 120 seconds. Please upload a smaller duration file.', 'error');
+      return;
+    }
+
+    setState(s => ({ ...s, uploadedFile: file, uploadState: 'uploading', progress: 0, isCancelled: false }));
     const videoUrl = file.type.startsWith('video/') ? URL.createObjectURL(file) : '';
     let progress = 0;
     const interval = setInterval(() => {
       progress += 5;
-      setState(s => ({ ...s, progress: Math.min(95, progress) }));
+      setState(s => (s.isCancelled ? s : { ...s, progress: Math.min(95, progress) }));
     }, 300);
     await submitFileToDub(file);
     clearInterval(interval);
@@ -296,33 +363,44 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
       videoRef.current.src = videoUrl;
       videoRef.current.load();
     }
-  }, [submitFileToDub, showNotification]);
+  }, [submitFileToDub, showNotification, checkFileDuration]);
 
   const handleButtonClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
     e.stopPropagation();
-    if (state.sourceLanguage === state.targetLanguage) {
-      showNotification('Source and Target languages cannot be the same', 'error');
-      return;
-    }
     fileInputRef.current?.click();
-  }, [state.sourceLanguage, state.targetLanguage, showNotification]);
+  }, []);
 
   const handleCancel = useCallback(() => {
     [state.videoUrl, state.translatedAudioUrl].forEach(url => url && URL.revokeObjectURL(url));
-    setState(s => ({
-      ...s,
+    setState({
+      sourceLanguage: DEFAULT_SOURCE_LANGUAGE,
+      targetLanguage: DEFAULT_TARGET_LANGUAGE,
+      dragActive: false,
+      uploadedFile: null,
       uploadState: null,
       progress: 0,
-      uploadedFile: null,
+      currentTime: 0,
+      duration: 0,
+      sourceCurrentTime: 0,
+      sourceDuration: 0,
+      targetCurrentTime: 0,
+      targetDuration: 0,
+      addBackgroundMusic: false,
+      playbackSpeed: 1,
+      isPlaying: false,
+      isMuted: false,
+      isFullscreen: false,
       videoUrl: '',
       translatedAudioUrl: '',
+      emailAddress: state.emailAddress,
+      isEmailSubmitted: false,
+      isLanguageSelectorOpen: { source: false, target: false },
       jobId: null,
-      currentTime: 0, duration: 0,
-      sourceCurrentTime: 0, sourceDuration: 0,
-      targetCurrentTime: 0, targetDuration: 0,
-      isPlaying: false,
-    }));
-  }, [state.videoUrl, state.translatedAudioUrl]);
+      isTranslatedPlaying: false,
+      notification: null,
+      isCancelled: true,
+    });
+  }, [state.videoUrl, state.translatedAudioUrl, state.emailAddress]);
 
   const handleStartOver = useCallback(() => {
     videoRef.current?.pause();
@@ -350,10 +428,12 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
       videoUrl: '',
       translatedAudioUrl: '',
       emailAddress: '',
+      isEmailSubmitted: false,
       isLanguageSelectorOpen: { source: false, target: false },
       jobId: null,
       isTranslatedPlaying: false,
       notification: null,
+      isCancelled: false,
     });
   }, [state.videoUrl, state.translatedAudioUrl, state.uploadedFile]);
 
@@ -393,11 +473,24 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
   }, []);
 
   const handleLanguageSelect = useCallback((type: 'source' | 'target', language: string) => {
-    setState(s => ({
-      ...s,
-      [type === 'source' ? 'sourceLanguage' : 'targetLanguage']: language,
-      isLanguageSelectorOpen: { ...s.isLanguageSelectorOpen, [type]: false },
-    }));
+    setState(s => {
+      const newState = {
+        ...s,
+        [type === 'source' ? 'sourceLanguage' : 'targetLanguage']: language,
+        isLanguageSelectorOpen: { ...s.isLanguageSelectorOpen, [type]: false },
+      };
+      // Adjust targetLanguage if it matches the selected sourceLanguage
+      if (type === 'source' && language === s.targetLanguage) {
+        const availableTargets = targetLanguages.filter(l => l.language !== language);
+        newState.targetLanguage = availableTargets[0]?.language || DEFAULT_TARGET_LANGUAGE;
+      }
+      // Adjust sourceLanguage if it matches the selected targetLanguage
+      if (type === 'target' && language === s.sourceLanguage) {
+        const availableSources = sourceLanguages.filter(l => l.language !== language);
+        newState.sourceLanguage = availableSources[0]?.language || DEFAULT_SOURCE_LANGUAGE;
+      }
+      return newState;
+    });
   }, []);
 
   useEffect(() => {
@@ -424,14 +517,14 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
   useEffect(() => {
     let timeoutId: ReturnType<typeof setTimeout>;
     const pollStatus = async () => {
-      if (state.jobId && state.uploadState === 'processing') {
+      if (state.jobId && state.uploadState === 'processing' && !state.isCancelled) {
         await checkJobStatus(state.jobId);
         timeoutId = setTimeout(pollStatus, 60000);
       }
     };
     pollStatus();
     return () => clearTimeout(timeoutId);
-  }, [state.jobId, state.uploadState, checkJobStatus]);
+  }, [state.jobId, state.uploadState, checkJobStatus, state.isCancelled]);
 
   useEffect(() => {
     if (state.uploadState === 'completed' && videoRef.current && state.uploadedFile?.type.startsWith('video/')) {
@@ -456,7 +549,9 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
     isOpen: boolean;
     onSelect: (type: 'source' | 'target', language: string) => void;
   }) => {
-    const languages = type === 'source' ? sourceLanguages : targetLanguages;
+    const languages = type === 'source' 
+      ? sourceLanguages 
+      : targetLanguages.filter(l => l.language !== state.sourceLanguage);
     const selectedLang = useMemo(() => languages.find(l => l.language === selectedLanguage), [selectedLanguage]);
     return (
       <div className="flex flex-col space-y-2 w-full">
@@ -464,7 +559,7 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
         <div className="relative w-full">
           <button onClick={() => onToggle(type)} className="flex items-center gap-2 bg-white/10 text-white px-4 py-2 w-full rounded-xl cursor-pointer text-sm">
             {selectedLang?.flag && <img src={selectedLang.flag} alt={`${selectedLanguage} flag`} className="w-7 h-7" />}
-            <span class="text-white">{selectedLanguage}</span>
+            <span className="text-white">{selectedLanguage}</span>
             <img className={`absolute right-2 w-5 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`} src="https://i.ibb.co/pBLj0Y2z/dropdown-1.png" alt="Dropdown" />
           </button>
           {isOpen && (
@@ -474,7 +569,7 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
                   <div key={l.locale} className="group">
                     <button onClick={() => onSelect(type, l.language)} className="w-full px-4 py-3 text-left cursor-pointer flex items-center gap-2 text-white hover:bg-white/10 text-sm">
                       <img src={l.flag} alt={`${l.language} flag`} className="w-7 h-7" />
-                      <span class="text-white">{l.language}</span>
+                      <span className="text-white">{l.language}</span>
                     </button>
                     {i !== languages.length - 1 && <div className="h-[1px] bg-white/20 w-11/12 mx-auto" />}
                   </div>
@@ -485,10 +580,48 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
         </div>
       </div>
     );
-  }, []);
+  }, [state.sourceLanguage]);
 
   const sourceLang = useMemo(() => sourceLanguages.find(l => l.language === state.sourceLanguage), [state.sourceLanguage]);
   const targetLang = useMemo(() => targetLanguages.find(l => l.language === state.targetLanguage), [state.targetLanguage]);
+
+  const EmailInputSection = () => (
+    <>
+      {!state.isEmailSubmitted ? (
+        <>
+          <div className="text-white/80 text-sm mb-2">Share your email we'll send the output to your inbox when ready. (Optional)</div>
+          <div className="flex gap-2 items-center w-full max-w-xl mx-auto">
+            <div className="relative flex-grow">
+              <input
+                type="email"
+                placeholder="Email"
+                className="w-full py-2.5 px-6 rounded-xl text-gray-800 outline-none"
+                style={{ border: '3px solid transparent', backgroundImage: 'linear-gradient(white, white), linear-gradient(90deg, #FF5E3B 0%, #C516E1 100%)', backgroundOrigin: 'border-box', backgroundClip: 'padding-box, border-box' }}
+                value={state.emailAddress}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setState(s => ({ ...s, emailAddress: e.target.value }))}
+              />
+            </div>
+            <button
+              className="ml-2 rounded-2xl p-3.5 flex items-center justify-center"
+              style={{ background: 'linear-gradient(90deg, #FF5E3B 0%, #C516E1 100%)' }}
+              onClick={() => state.jobId ? updateEmail(state.jobId, state.emailAddress) : showNotification('No job ID available', 'error')}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M5 12H19M19 12L12 5M19 12L12 19" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+        </>
+      ) : (
+        <div className="flex items-center gap-2 text-white/80 text-sm">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M20 6L9 17L4 12" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+          <span>Your Email has been submitted. We will send the dubbed file to your inbox <span style={{ background: 'linear-gradient(90deg, #FF5E3B 0%, #C516E1 100%)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>{state.emailAddress}</span></span>
+        </div>
+      )}
+    </>
+  );
 
   if (state.uploadState === 'uploading' || state.uploadState === 'processing') {
     return (
@@ -505,30 +638,9 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
             </div>
           </div>
           <hr className="my-6 border-t border-white/10" />
-          {/* <div className="text-center">
-            <p className="text-white/80 text-sm mb-4">Share your email we'll send the output to your inbox when ready. (Optional)</p>
-            <div className="flex gap-2 items-center w-full max-w-xl mx-auto">
-              <div className="relative flex-grow">
-                <input
-                  type="email"
-                  placeholder="Email"
-                  className="w-full py-2.5 px-6 rounded-xl text-gray-800 outline-none"
-                  style={{ border: '3px solid transparent', backgroundImage: 'linear-gradient(white, white), linear-gradient(90deg, #FF5E3B 0%, #C516E1 100%)', backgroundOrigin: 'border-box', backgroundClip: 'padding-box, border-box' }}
-                  value={state.emailAddress}
-                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setState(s => ({ ...s, emailAddress: e.target.value }))}
-                />
-              </div>
-              <button
-                className="ml-2 rounded-2xl p-3.5 flex items-center justify-center"
-                style={{ background: 'linear-gradient(90deg, #FF5E3B 0%, #C516E1 100%)' }}
-                onClick={() => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(state.emailAddress) ? showNotification(`We'll send the file to ${state.emailAddress}`, 'success') : showNotification('Please enter a valid email address', 'error')}
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M5 12H19M19 12L12 5M19 12L12 19" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            </div>
-          </div> */}
+          <div className="text-center">
+            <EmailInputSection />
+          </div>
         </div>
       </div>
     );
@@ -541,11 +653,11 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
           {state.notification && <Notification message={state.notification.message} type={state.notification.type} onClose={() => setState(s => ({ ...s, notification: null }))} />}
           <div className="w-full max-w-3xl text-center">
             <div className="mb-2 md:mb-8 flex items-center justify-center">
-              <span className="text-yellow-400 text-4xl mr-2">🎉</span>
+              <h4 className="text-yellow-400 text-4xl mr-2">🎉</h4>
               <h4 className="text-4xl md:text-4xl font-bold text-white whitespace-nowrap">Your Translated Audio is Ready.</h4>
             </div>
             <div className="border-2 border-dashed border-white/15 rounded-xl p-8 bg-purple/40 shadow-lg">
-              <div className="audio-container flex md:flex-row gap-8 justify-center mb-6">
+              <div className="audio-cont flex md:flex-row gap-8 justify-center mb-6">
                 <div className="flex-1 flex flex-col items-center">
                   <div className="flex items-center gap-2 mb-2">
                     {sourceLang?.flag && <img src={sourceLang.flag} alt={`${state.sourceLanguage} flag`} className="w-7 h-7" />}
@@ -631,22 +743,11 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
                     </div>
                     <span className="text-white/60 text-sm ml-4">{`${formatTime(state.targetCurrentTime)}/${formatTime(state.targetDuration)}`}</span>
                   </div>
-                  <div className="flex items-center justify-between px-2 mt-6 md:mt-4 backdrop-blur-2xl bg-white/5 border border-white/10 rounded-[20px] py-2 w-full shadow-md">
-                    <div className="flex items-center gap-2">
-                      <div className="w-5 h-5 rounded-full flex items-center justify-center">
-                        <img src="https://murf.ai/public-assets/murf-mono-repo/islands/infoNew.svg" alt="Info" className="w-6 h-6" />
-                      </div>
-                      <span className="text-white/90 text-sm md:text-sm text-xs whitespace-nowrap">Add Background Music to Audio</span>
-                    </div>
-                    <div className={`w-12 h-6 rounded-full relative cursor-pointer ${state.addBackgroundMusic ? 'bg-purple-500' : 'bg-gray-600'}`} onClick={() => setState(s => ({ ...s, addBackgroundMusic: !s.addBackgroundMusic }))}>
-                      <div className={`absolute w-4 h-4 bg-white rounded-full top-1 transition-all ${state.addBackgroundMusic ? 'right-1' : 'left-1'}`}></div>
-                    </div>
-                  </div>
                   <div className="flex justify-center gap-4 mt-6 w-full">
-                    <button onClick={handleDownload} className="bg-gradient-to-r from-[#FF5E3B] to-[#C516E1] text-white py-3 px-6 rounded-2xl font-medium flex items-center gap-2">
+                    <button onClick={handleDownload} className="bg-gradient-to-r from-[#FF5E3B] to-[#C516E1] text-white py-3 px-6 rounded-xl font-medium flex items-center gap-2">
                       <span className="text-sm md:text-base text-white whitespace-nowrap">Download</span> <span className="text-white ml-1">➜</span>
                     </button>
-                    <button onClick={handleStartOver} className="bg-white/10 text-white py-3 px-6 rounded-2xl font-medium flex items-center gap-2 border border-white/20">
+                    <button onClick={handleStartOver} className="bg-white/10 text-white py-3 px-6 rounded-xl font-medium flex items-center gap-2 border border-white/20">
                       <span className="text-sm md:text-base text-white whitespace-nowrap">Start Over</span> <span className="text-white ml-1">➜</span>
                     </button>
                   </div>
@@ -657,23 +758,22 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
         </div>
       );
     }
-
     return (
       <div className="w-full bg-transparent font-sans flex flex-col items-center justify-center p-2">
         {state.notification && <Notification message={state.notification.message} type={state.notification.type} onClose={() => setState(s => ({ ...s, notification: null }))} />}
         <div className="w-full max-w-3xl h-full flex flex-col text-center">
           <div className="mb-2 md:mb-8 flex items-center justify-center">
-            <span className="text-yellow-400 text-4xl mr-2">🎉</span>
+            <h4 className="text-yellow-400 text-4xl mr-2">🎉</h4>
             <h4 className="text-4xl md:text-4xl font-bold text-white whitespace-nowrap">Your Translated Video is Ready.</h4>
           </div>
-          <div className="border-2 border-dashed border-white/15 rounded-xl p-4 md:p fishing-8 bg-purple/40 shadow-lg flex-1 flex flex-col">
+          <div className="border-2 border-dashed border-white/15 rounded-xl p-4 md:p-8 bg-purple/40 shadow-lg flex-1 flex flex-col">
             <div className="mb-4 md:mb-6 mx-auto flex items-center justify-center">
               <div className="flag-btn-border flex rounded-full overflow-hidden cursor-pointer bg-white" onClick={handleLanguageToggle}>
-                <button className="py-2 px-4 flex-1 flex items-center justify-center text-gray-800 font-medium" style={{ background: '#fff' }}>
+                <button className="py-2 px-4 flex-1 flex items-center justify-center text-gray-800 font-medium" style={{ background: state.isTranslatedPlaying ? '#fff' : 'linear-gradient(90deg, #FF5E3B 0%, #C516E1 100%)' }}>
                   {sourceLang?.flag && <img src={sourceLang.flag} alt={`${state.sourceLanguage} flag`} className="w-7 h-7 mr-2" />}
                   {state.sourceLanguage}
                 </button>
-                <button className="flag-btn py-2 px-4 flex-1 flex items-center justify-center font-medium" style={{ background: 'linear-gradient(90deg, #FF5E3B 0%, #C516E1 100%)' }}>
+                <button className="py-2 px-4 flex-1 flex items-center justify-center font-medium" style={{ background: state.isTranslatedPlaying ? 'linear-gradient(90deg, #FF5E3B 0%, #C516E1 100%)' : '#fff' }}>
                   {targetLang?.flag && <img src={targetLang.flag} alt={`${state.targetLanguage} flag`} className="w-7 h-7 mr-2" />}
                   {state.targetLanguage}
                 </button>
@@ -742,25 +842,12 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
                   </div>
                 </div>
               )}
-              {!state.isFullscreen && (
-                <div className="flex items-center justify-between px-2 mt-6 md:mt-6 bg-white/10 rounded-full py-2">
-                  <div className="flex items-center gap-2">
-                    <div className="w-5 h-5 rounded-full flex items-center justify-center">
-                      <img src="https://murf.ai/public-assets/murf-mono-repo/islands/infoNew.svg" alt="Info" className="w-5 h-5" />
-                    </div>
-                    <span className="text-white/90 text-sm md:text-sm text-xs whitespace-nowrap">Add Background Music to Audio</span>
-                  </div>
-                  <div className={`w-12 h-6 rounded-full relative cursor-pointer ${state.addBackgroundMusic ? 'bg-purple-500' : 'bg-gray-600'}`} onClick={() => setState(s => ({ ...s, addBackgroundMusic: !s.addBackgroundMusic }))}>
-                    <div className={`absolute w-4 h-4 bg-white rounded-full top-1 transition-all ${state.addBackgroundMusic ? 'right-1' : 'left-1'}`}></div>
-                  </div>
-                </div>
-              )}
             </div>
             <div className="flex justify-center gap-4 md:mt-1 w-full">
-              <button onClick={handleDownload} className="bg-gradient-to-r from-[#FF5E3B] to-[#C516E1] text-white py-3 px-6 rounded-2xl font-medium flex items-center gap-2">
+              <button onClick={handleDownload} className="bg-gradient-to-r from-[#FF5E3B] to-[#C516E1] text-white py-3 px-6 rounded-xl font-medium flex items-center gap-2">
                 <span className="text-sm md:text-base text-white whitespace-nowrap">Download</span> <span className="text-white ml-1">➜</span>
               </button>
-              <button onClick={handleStartOver} className="bg-white/10 text-white py-3 px-6 rounded-2xl font-medium flex items-center gap-2 border border-white/20">
+              <button onClick={handleStartOver} className="bg-white/10 text-white py-3 px-6 rounded-xl font-medium flex items-center gap-2 border border-white/20">
                 <span className="text-sm md:text-base text-white whitespace-nowrap">Start Over</span> <span className="text-white ml-1">➜</span>
               </button>
             </div>
@@ -771,7 +858,7 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
   }
 
   return (
-    <div className="w-full bg-transparent flex justify-center items-center p-2">
+    <div className="w-full bg-blue flex justify-center items-center p-2">
       {state.notification && <Notification message={state.notification.message} type={state.notification.type} onClose={() => setState(s => ({ ...s, notification: null }))} />}
       <div className="w-full max-w-3xl text-center">
         <h1 className="text-2xl text-white mb-8">{title}</h1>
@@ -824,7 +911,7 @@ const AudioTranslatorComponent = ({ title }: AudioTranslatorProps) => {
                 />
                 <button className="flex items-center gap-2 bg-white/10 text-white rounded-xl py-3 px-6 text-sm hover:bg-white/20" onClick={e => { e.stopPropagation(); handleButtonClick(e); }}>
                   <img src="https://murf.ai/public-assets/murf-mono-repo/islands/browseImg.svg" alt="Browse" className="w-4 h-4" />
-                  <span class="text-white/80">Browse Files</span>
+                  <span className="text-white/80">Browse Files</span>
                 </button>
                 <div className="flex items-center gap-1.5 text-white/60 text-xs mt-6">
                   <img src="https://murf.ai/public-assets/murf-mono-repo/islands/info.svg" alt="Info" className="w-4 h-4" />
